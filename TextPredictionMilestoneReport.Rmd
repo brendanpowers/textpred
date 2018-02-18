@@ -1,0 +1,159 @@
+---
+title: "Text Prediction Milestone Report"
+author: "Brendan"
+date: "February 6, 2018"
+output: 
+  html_document:
+    code_folding: hide
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Proposed Shiney App
+  The objective for the shiny app is to predict the next words that the user wants in their sentence.   The user will type a word or phase and a recommendation will be made.  The word can be selected and added to the sentence.  The User will be able to select if the prediction should be made from one Corpus or all three Corpus.  
+  Three models will be trained based on each of the three corpus. If three corpus are selected, each model will vote on the next word.  Each model will utilize 3-grams, 2- grams and unigrams to predict the next word.  
+  In order to develop the models, the data will first be divided into training, validation and test sets for each corpus.  The probability of unigrams, 2- grams and 3- grams occurring will be calculated on the training set.  When there are two words available to predict from, the model will look to see if there are 3- grams that start with those words.  If there are 3- grams that start with those words, the 3-gram with the highest probability will be selected.  The probability of an 3-gram, 2-gram or unigram occurring is the number of times the gram occurs divided by the total possible occurrence.  2-gram will only consider the previous word to predict the next word.  Unigram prediction simply recommends the most common word from the corpus.  
+  The model will be tuned to maximize the probability of predicting the correct word based.  This will be measured by how often the model can predict the next word in the each document in the Corpus divided by the total number of predictions. The 3-gram score (S3) is equal to the probability of the most likely 3-gram(P3) multiplied by the 3-gram weight (W3), $S3 = P3*W3$. The 2-gram score (S2) is equal to probability of the most likely 2-gram (P2) multiplied by the 2- gram weighting, (W2)$S2 = P2*W2$.  The unigram score S1 is equal to the highest probability unigram P1, $S1=P1$.  The maximum score is used to determine which word will be predicted.  
+  $$  max
+  \begin{cases}
+    S3 = P3*W3       & \\
+    S2 = P2*W2\\
+    S1 = P1
+  \end{cases}
+ $$
+
+  
+
+
+# Obtaining the data
+
+  The functions for this report are loaded from **TPfunction.R**. The data are downloaded and unzipped, if the directories do not already exist on the harddrive.  
+
+``` {r downloadData, message = FALSE, results="hide", include=FALSE}
+source(file.path(getwd(),"TPfunctions.R"))
+SwiftDataDir <- paste0(getwd(),"/SwDataDir")
+Swiftfile <- "Coursera-SwiftKey.zip"
+SwFilePath <- paste0(SwiftDataDir,"/",Swiftfile)
+SwUrl <- "https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip"
+UnZipDir <- paste0(getwd(),"/UnZipDir")
+downloadCorpus(SwiftDataDir, Swiftfile, SwFilePath,SwUrl)
+```
+
+  The length, word count and size of the files can be checked without the need to load the entire file at one time.  This information is in the table below.  
+```{r , cache=TRUE, message=FALSE}
+  enDir <- paste0(UnZipDir, "/final/en_US")
+  files <- data.frame(enBlogs = "en_US.blogs.txt",
+    enNews = "en_US.news.txt",
+    entwitter = "en_US.twitter.txt",
+    stringsAsFactors = FALSE)
+FilesSummary <-filesum(enDir, files)
+FilesSummary
+```
+*Table 1:* **Summary of Corpus files**
+
+  *Table 1*, above, shows the number of lines (numln), word count (wordct), and filesize is megabytes (filesize_mb).  The file **enBlogs**, containing text from US english blogs, is the largest file in all regards except the number of lines. The **entwitter** file, containing US english twitter feeds, has most lines but lower word count.  The **enNews** file, containings US english news text, has the lowest number of lines and word count but not the smallest file size.  The could be due to a greater prevalence of text that is either numerical of html.  The function numlineswords would not count many of these type of text as words, but this text would still contribute to the filesize.  
+
+  The file sizes of Corpus files means that it may be difficult to load the
+files into memory.  The strategy for reducing the memory consumption is to 
+load only a small portion of the data into memory and analyze that data. 
+Later if the modeling appears to be overfit or high in variance, more data can be used to train the model.  
+
+##Loading a portion of the data by sampling
+  The english text files have been loaded and the sampled text for each file stored in a sampledlines.  The data sampledlines are used to create three virtual corpus named **blogs**, **news**, **twitter**.  Initially, approximately 7000 lines of text will be read from each Corpus.
+```{r include=FALSE}
+require(tm)
+set.seed(110)
+sampledlines <- enCorpora <- list()
+for (n in 1:length(files)) {
+  con <- file(paste0(enDir,"/", files[,n]) , open="r")
+  sampledlines <- c(sampledlines, 
+                    list(samplereadlines(con, filelengths[,n]))) 
+  close(con)
+}
+```
+
+```{r include=FALSE}
+blogs <- VCorpus(VectorSource(sampledlines[1]),
+                    readerControl=list(readPlain, language="en", load=TRUE))
+news <- VCorpus(VectorSource(sampledlines[2]), 
+                    readerControl=list(readPlain, language="en", load=TRUE))
+twitter <- VCorpus(VectorSource(sampledlines[3]),  
+                    readerControl=list(readPlain, language="en", load=TRUE))
+```
+
+  The punctuation, numbers, stopwords(very common words), white space, special characters are removed for each of the three corpus (named blogs, news, twitter).  The corpus also have all capital letters converted to lower case letters. This means that **will**, **Will**, and **will**, will all be stored in the corpus as **will**.  
+```{r include=FALSE}
+require(dplyr)
+
+blogs <- blogs %>%
+  tm_map(removePunctuation) %>% tm_map(removeNumbers) %>%
+  tm_map(tolower)  %>% tm_map(removeWords, stopwords("english")) %>%
+  tm_map(stripWhitespace) %>% tm_map(PlainTextDocument)
+news <- news %>%
+  tm_map(removePunctuation) %>% tm_map(removeNumbers) %>%
+  tm_map(tolower)  %>% tm_map(removeWords, stopwords("english")) %>%
+  tm_map(stripWhitespace) %>% tm_map(PlainTextDocument)
+twitter <- twitter %>%
+  tm_map(removePunctuation) %>% tm_map(removeNumbers) %>%
+  tm_map(tolower)  %>% tm_map(removeWords, stopwords("english")) %>%
+  tm_map(stripWhitespace) %>% tm_map(PlainTextDocument)
+```
+
+  A document term matrix is created for each corpus.  This counts each unique word and stores the word and the number of occurrences of the word. The frequency of how many words occur one times, two times, three times, etc. is counted and stored as **freq** with the **key** of which corpus the words came from.  This can be plotted as the density of word frequencies as shown in *Figure 1*.  
+```{r}
+dtm_blogs <- DocumentTermMatrix(blogs)
+dtm_news  <- DocumentTermMatrix(news)
+dtm_twitter <- DocumentTermMatrix(twitter)
+freq_blogs <- colSums(as.matrix(dtm_blogs))
+freq_news  <- colSums(as.matrix(dtm_news))
+freq_twitter<- colSums(as.matrix(dtm_twitter))
+key = c(rep("blogs",length(freq_blogs)),rep("news",length(freq_news)),
+        rep("twitter",length(freq_twitter)))
+freq <- data.frame( freq = c(freq_blogs,freq_news,freq_twitter), key = as.factor(key))
+```
+
+```{r}
+library(ggplot2)
+ggplot(data=freq,
+       aes(x = freq, group=key, fill = factor(key,levels(key)[c(3,1,2)]))) +
+  geom_density(adjust = 5) +
+  xlim(0,20)+
+  scale_fill_manual(values = alpha(c("blue", "red","yellow"), .3))+
+  labs(x="word frequency", fill="word source")+
+  geom_vline(xintercept=1)
+```  
+
+*Figure 1:* **Density of word frequencies**  
+
+  *Figure 1* is zoomed in to show word frequencies ranging from 1-20. A vertical line is drawn at word frequency of 1. This shows the highest density of word frequency is one for all corpus.  The plot shows that twitter has the highest count of words occurring only once followed by blogs, and news.  Misspellings and proper nouns appearing only once and the total number of words in the corpus all effect how many word appear only once.  This also is an indication that a model using different corpus may result in a differing predictions.  
+
+
+```{r percent5090}
+require(dplyr); require(tidyr)
+freqcm <- freq%>% mutate(ind = row_number()) %>% spread(key,freq, fill=0)
+freq <- freqcm[,2:4]
+freq <- data.frame(lapply(freq,sort,decreasing=T))
+freqcm <- cumsum(freq)
+posper <- function (cumfreq,per) 
+  min(which(cumfreq > cumfreq[length(cumfreq)]*per))
+data_frame(Percentage = c(50,90, 100), 
+      Blogs = c(posper(freqcm$blogs,.5),posper(freqcm$blogs,.9),sum(freq[,1])), 
+      News = c(posper(freqcm$news,.5),posper(freqcm$news,.9),sum(freq[,2])), 
+      Twitter = c(posper(freqcm$twitter,.5),posper(freqcm$twitter,.9),sum(freq[,3])))
+```
+*Table 2:*  **Number of words required to account for 50 and 90 percent of all words.**  
+
+*Table 2* shows the minimum number of unique words to account for 50%, 90% or 100% (total number of words).  Twitter has fewer unique words and fewer words required to account for 50 or 90% of word occurrences than the blogs and news corpus.  Blogs and news corpus have a similar number of unique words and the minimum number of unique words to account for 50% and 90% of the total number of words is similar.
+
+#Summary  
+  Different applications for text prediction may effect the optimal source of text to use to create a Corpus.  The Shiny application will allow the user some control over how the text is predicted. The user may select to use one or all three Corpus to predict text.
+
+# External Code References
+
+[TPfunctions.R](TPfunctions.R)
+[profanity.R](Tprofanity.R)
+
+
